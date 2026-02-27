@@ -98,8 +98,16 @@ class githubApi:
             raise
 
         try:
+            self.logger.info('Installations %s', instalations)
+            self.logger.info('Looking for login=[%s] app_id=[%s]', self.github_owner, self.github_app_id)
+            # use same approach of myoung34/docker-github-actions-runner
+            # see: https://github.com/myoung34/docker-github-actions-runner/blob/master/app_token.sh#L80
+            installation_filter = lambda i: i['account']['login'] == self.github_owner and str(i['app_id']) == str(self.github_app_id)
+            installation = next(filter(installation_filter, instalations))
+
+            self.logger.info('Found %s', installation)
             resp = requests.post(
-                f'{self.api_url}/app/installations/{instalations[0]["id"]}/access_tokens',
+                f"{installation['access_tokens_url']}",
                 headers=jwt_headers,
             )
             resp.raise_for_status()
