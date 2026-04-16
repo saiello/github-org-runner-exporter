@@ -219,7 +219,8 @@ def main():
 
     while True:
         runners_list = github.list_runners()
-        job_map = github.get_runner_jobs_map() if runners_list else {}
+        any_busy = any(r.get("busy") for r in runners_list)
+        job_map = github.get_runner_jobs_map() if any_busy else {}
 
         if runners_list:
             runner_exports.export_metrics(runners_list, job_map)

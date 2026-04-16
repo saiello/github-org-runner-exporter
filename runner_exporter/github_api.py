@@ -237,17 +237,9 @@ class githubApi:
             return {}
 
         self.logger.info(f"Fetching in-progress runs for {len(self.monitored_repos)} repos")
-        workers = min(len(self.monitored_repos), 10)
 
-        # Step 1: fetch in-progress runs for all repos in parallel
-        repo_runs = {}
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            future_to_repo = {
-                executor.submit(self._list_in_progress_runs, repo): repo
-                for repo in self.monitored_repos
-            }
-            for future in as_completed(future_to_repo):
-                repo_runs[future_to_repo[future]] = future.result()
+        # Step 1: single GraphQL query to get all in-progress runs across all monitored repos
+        repo_runs = self._graphql_in_progress_runs(self.monitored_repos)
 
         # Step 2: fetch jobs for all in-progress runs in parallel
         run_triples = [
@@ -276,37 +268,61 @@ class githubApi:
                         }
         return result
 
-    def _list_in_progress_runs(self, repo_full_name: str) -> list:
-        """Returns list of in-progress workflow run dicts for the given repo."""
-        headers = self.get_headers()
-        url = f"{self.api_url}/repos/{repo_full_name}/actions/runs?status=in_progress&per_page=100"
-        try:
-            self.logger.info(f"_list_in_progress_runs: GET {url}")
-            result = requests.get(url, headers=headers)
-            self.logger.info(
-                f"_list_in_progress_runs: {result.status_code} {result.reason} [{repo_full_name}]"
+    def _graphql_in_progress_runs(self, repos: list) -> dict:
+        """
+        Returns {repo_full_name: [run_dict, ...]} for repos that have in-progress runs.
+        Uses a single GraphQL request instead of one REST call per repo.
+        """
+        # Build aliased fragments for each repo so all fit in one request.
+        # GraphQL field names can't contain slashes or hyphens, so we use positional aliases.
+        fragments = []
+        for idx, full_name in enumerate(repos):
+            owner, name = full_name.split("/", 1)
+            fragments.append(
+                f"""
+                repo_{idx}: repository(owner: "{owner}", name: "{name}") {{
+                    workflowRuns(first: 20, filterBy: {{status: IN_PROGRESS}}) {{
+                        nodes {{
+                            databaseId
+                            name
+                        }}
+                    }}
+                }}"""
             )
-            if result.status_code == 404:
-                return []
-            if not result.ok:
+
+        query = "{ " + "\n".join(fragments) + " }"
+        url = f"{self.api_url.rstrip('/')}/graphql"
+        # GraphQL uses the same bearer token but via the v4 endpoint
+        headers = {**self.get_headers(), "Content-Type": "application/json"}
+        # GitHub GraphQL requires "Authorization: bearer <token>" format
+        headers["Authorization"] = headers["Authorization"].replace("token ", "bearer ")
+
+        try:
+            self.logger.info(f"_graphql_in_progress_runs: querying {len(repos)} repos in 1 call")
+            resp = requests.post(url, json={"query": query}, headers=headers)
+            if not resp.ok:
                 self.logger.error(
-                    f"_list_in_progress_runs error for {repo_full_name}: "
-                    f"{result.status_code} {result.reason} {result.text}"
+                    f"_graphql_in_progress_runs error: {resp.status_code} {resp.reason} {resp.text}"
                 )
-                return []
-            runs = result.json().get("workflow_runs", [])
-            if runs:
-                self.logger.info(
-                    f"_list_in_progress_runs: {len(runs)} in-progress run(s) in {repo_full_name}"
-                )
-            if len(runs) == 100:
-                self.logger.warning(
-                    f"{repo_full_name} returned 100 in-progress runs; some may be missed"
-                )
-            return runs
+                return {}
+            data = resp.json()
+            if "errors" in data:
+                self.logger.error(f"_graphql_in_progress_runs GraphQL errors: {data['errors']}")
+                return {}
         except Exception as e:
-            self.logger.error(f"_list_in_progress_runs exception for {repo_full_name}: {e}")
-            return []
+            self.logger.error(f"_graphql_in_progress_runs exception: {e}")
+            return {}
+
+        result = {}
+        for idx, full_name in enumerate(repos):
+            repo_data = data.get("data", {}).get(f"repo_{idx}")
+            if not repo_data:
+                continue
+            nodes = repo_data.get("workflowRuns", {}).get("nodes", [])
+            if nodes:
+                self.logger.info(f"_graphql_in_progress_runs: {len(nodes)} run(s) in {full_name}")
+                result[full_name] = [{"id": n["databaseId"], "name": n["name"]} for n in nodes]
+        return result
 
     def _list_run_jobs(self, repo_full_name: str, run_id: int) -> list:
         """Returns list of job dicts for the given workflow run."""
