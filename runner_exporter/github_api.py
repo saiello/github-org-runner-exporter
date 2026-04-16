@@ -33,7 +33,12 @@ class githubApi:
 
         self.metric_runner_api_ratelimit = Gauge(
             "github_runner_api_remain_rate_limit",
-            "Github Api remaining requests rate limit (per hour)",
+            "Github REST API remaining requests rate limit (per hour)",
+            ["org"],
+        )
+        self.metric_runner_graphql_ratelimit = Gauge(
+            "github_runner_graphql_remain_rate_limit",
+            "Github GraphQL API remaining points rate limit (per hour)",
             ["org"],
         )
 
@@ -291,7 +296,7 @@ class githubApi:
                 }}"""
             )
 
-        query = "{ " + "\n".join(fragments) + " }"
+        query = "{ rateLimit { remaining } " + "\n".join(fragments) + " }"
         graphql_url = "https://api.github.com/graphql"
         headers = {**self.get_headers(), "Content-Type": "application/json"}
 
@@ -310,6 +315,11 @@ class githubApi:
         except Exception as e:
             self.logger.error(f"_graphql_in_progress_runs exception: {e}")
             return {}
+
+        remaining = data.get("data", {}).get("rateLimit", {}).get("remaining")
+        if remaining is not None:
+            self.logger.debug(f"GraphQL rate limit remaining: {remaining}")
+            self.metric_runner_graphql_ratelimit.labels(self.github_owner).set(remaining)
 
         result = {}
         for idx, full_name in enumerate(repos):
