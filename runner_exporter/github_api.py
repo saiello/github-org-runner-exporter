@@ -4,6 +4,7 @@ import time
 import json
 import jwt
 import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dateutil import tz
 from prometheus_client import Gauge
@@ -242,17 +243,43 @@ class githubApi:
             self.logger.info("No monitored repos configured, skipping job enrichment")
             return {}
 
+        self.logger.info(f"Fetching in-progress runs for {len(self.monitored_repos)} repos")
+        workers = min(len(self.monitored_repos), 10)
+
+        # Step 1: fetch in-progress runs for all repos in parallel
+        repo_runs = {}
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_repo = {
+                executor.submit(self._list_in_progress_runs, repo): repo
+                for repo in self.monitored_repos
+            }
+            for future in as_completed(future_to_repo):
+                repo_runs[future_to_repo[future]] = future.result()
+
+        # Step 2: fetch jobs for all in-progress runs in parallel
+        run_triples = [
+            (repo, run["id"], run.get("name", "unknown"))
+            for repo, runs in repo_runs.items()
+            for run in runs
+        ]
+
+        if not run_triples:
+            return {}
+
         result = {}
-        self.logger.info(f"Using monitored repos list: {self.monitored_repos}")
-        for repo_full_name in self.monitored_repos:
-            runs = self._list_in_progress_runs(repo_full_name)
-            for run in runs:
-                jobs = self._list_run_jobs(repo_full_name, run["id"])
-                for job in jobs:
+        workers = min(len(run_triples), 10)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_meta = {
+                executor.submit(self._list_run_jobs, repo, run_id): (repo, workflow)
+                for repo, run_id, workflow in run_triples
+            }
+            for future in as_completed(future_to_meta):
+                repo, workflow = future_to_meta[future]
+                for job in future.result():
                     if job.get("status") == "in_progress" and job.get("runner_id"):
                         result[job["runner_id"]] = {
-                            "repository": repo_full_name,
-                            "workflow": run.get("name", "unknown"),
+                            "repository": repo,
+                            "workflow": workflow,
                         }
         return result
 

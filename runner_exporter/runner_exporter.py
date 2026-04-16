@@ -193,7 +193,7 @@ class runnerExports:
 
 
 def main():
-    REFRESH_INTERVAL = int(os.getenv("REFRESH_INTERVAL", 20))
+    REFRESH_INTERVAL = int(os.getenv("REFRESH_INTERVAL", 30))
     PRIVATE_GITHUB_TOKEN = os.getenv("PRIVATE_GITHUB_TOKEN")
     GITHUB_APP_ID = os.getenv("GITHUB_APP_ID")
     GITHUB_PRIVATE_KEY = os.getenv("GITHUB_PRIVATE_KEY")
