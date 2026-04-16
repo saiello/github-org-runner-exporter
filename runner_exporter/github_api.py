@@ -33,12 +33,7 @@ class githubApi:
 
         self.metric_runner_api_ratelimit = Gauge(
             "github_runner_api_remain_rate_limit",
-            "Github REST API remaining requests rate limit (per hour)",
-            ["org"],
-        )
-        self.metric_runner_graphql_ratelimit = Gauge(
-            "github_runner_graphql_remain_rate_limit",
-            "Github GraphQL API remaining points rate limit (per hour)",
+            "Github API remaining requests rate limit (per hour)",
             ["org"],
         )
 
@@ -243,8 +238,16 @@ class githubApi:
 
         self.logger.info(f"Fetching in-progress runs for {len(self.monitored_repos)} repos")
 
-        # Step 1: single GraphQL query to get all in-progress runs across all monitored repos
-        repo_runs = self._graphql_in_progress_runs(self.monitored_repos)
+        # Step 1: fetch in-progress runs for all repos in parallel
+        workers = min(len(self.monitored_repos), 10)
+        repo_runs = {}
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_repo = {
+                executor.submit(self._list_in_progress_runs, repo): repo
+                for repo in self.monitored_repos
+            }
+            for future in as_completed(future_to_repo):
+                repo_runs[future_to_repo[future]] = future.result()
 
         # Step 2: fetch jobs for all in-progress runs in parallel
         run_triples = [
@@ -273,69 +276,29 @@ class githubApi:
                         }
         return result
 
-    def _graphql_in_progress_runs(self, repos: list) -> dict:
-        """
-        Returns {repo_full_name: [run_dict, ...]} for repos that have in-progress runs.
-        Uses a single GraphQL request instead of one REST call per repo.
-        """
-        # Build aliased fragments for each repo so all fit in one request.
-        # GraphQL field names can't contain slashes or hyphens, so we use positional aliases.
-        fragments = []
-        for idx, full_name in enumerate(repos):
-            owner, name = full_name.split("/", 1)
-            fragments.append(
-                f"""
-                repo_{idx}: repository(owner: "{owner}", name: "{name}") {{
-                    workflowRuns(first: 20) {{
-                        nodes {{
-                            databaseId
-                            name
-                            status
-                        }}
-                    }}
-                }}"""
-            )
-
-        query = "{ rateLimit { remaining } " + "\n".join(fragments) + " }"
-        graphql_url = "https://api.github.com/graphql"
-        headers = {**self.get_headers(), "Content-Type": "application/json"}
-
+    def _list_in_progress_runs(self, repo_full_name: str) -> list:
+        """Returns list of in-progress workflow run dicts for the given repo."""
+        headers = self.get_headers()
+        url = f"{self.api_url}/repos/{repo_full_name}/actions/runs?status=in_progress&per_page=100"
         try:
-            self.logger.info(f"_graphql_in_progress_runs: querying {len(repos)} repos in 1 call")
-            resp = requests.post(graphql_url, json={"query": query}, headers=headers)
-            if not resp.ok:
+            result = requests.get(url, headers=headers)
+            if result.status_code == 404:
+                return []
+            if not result.ok:
                 self.logger.error(
-                    f"_graphql_in_progress_runs error: {resp.status_code} {resp.reason} {resp.text}"
+                    f"_list_in_progress_runs error for {repo_full_name}: "
+                    f"{result.status_code} {result.reason} {result.text}"
                 )
-                return {}
-            data = resp.json()
-            if "errors" in data:
-                self.logger.error(f"_graphql_in_progress_runs GraphQL errors: {data['errors']}")
-                return {}
-        except Exception as e:
-            self.logger.error(f"_graphql_in_progress_runs exception: {e}")
-            return {}
-
-        remaining = data.get("data", {}).get("rateLimit", {}).get("remaining")
-        if remaining is not None:
-            self.logger.debug(f"GraphQL rate limit remaining: {remaining}")
-            self.metric_runner_graphql_ratelimit.labels(self.github_owner).set(remaining)
-
-        result = {}
-        for idx, full_name in enumerate(repos):
-            repo_data = data.get("data", {}).get(f"repo_{idx}")
-            if not repo_data:
-                continue
-            nodes = repo_data.get("workflowRuns", {}).get("nodes", [])
-            in_progress = [n for n in nodes if n.get("status") == "IN_PROGRESS"]
-            if in_progress:
+                return []
+            runs = result.json().get("workflow_runs", [])
+            if runs:
                 self.logger.info(
-                    f"_graphql_in_progress_runs: {len(in_progress)} in-progress run(s) in {full_name}"
+                    f"{len(runs)} in-progress run(s) in {repo_full_name}"
                 )
-                result[full_name] = [
-                    {"id": n["databaseId"], "name": n["name"]} for n in in_progress
-                ]
-        return result
+            return runs
+        except Exception as e:
+            self.logger.error(f"_list_in_progress_runs exception for {repo_full_name}: {e}")
+            return []
 
     def _list_run_jobs(self, repo_full_name: str, run_id: int) -> list:
         """Returns list of job dicts for the given workflow run."""
