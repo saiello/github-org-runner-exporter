@@ -281,25 +281,23 @@ class githubApi:
             fragments.append(
                 f"""
                 repo_{idx}: repository(owner: "{owner}", name: "{name}") {{
-                    workflowRuns(first: 20, filterBy: {{status: IN_PROGRESS}}) {{
+                    workflowRuns(first: 20) {{
                         nodes {{
                             databaseId
                             name
+                            status
                         }}
                     }}
                 }}"""
             )
 
         query = "{ " + "\n".join(fragments) + " }"
-        url = f"{self.api_url.rstrip('/')}/graphql"
-        # GraphQL uses the same bearer token but via the v4 endpoint
+        graphql_url = "https://api.github.com/graphql"
         headers = {**self.get_headers(), "Content-Type": "application/json"}
-        # GitHub GraphQL requires "Authorization: bearer <token>" format
-        headers["Authorization"] = headers["Authorization"].replace("token ", "bearer ")
 
         try:
             self.logger.info(f"_graphql_in_progress_runs: querying {len(repos)} repos in 1 call")
-            resp = requests.post(url, json={"query": query}, headers=headers)
+            resp = requests.post(graphql_url, json={"query": query}, headers=headers)
             if not resp.ok:
                 self.logger.error(
                     f"_graphql_in_progress_runs error: {resp.status_code} {resp.reason} {resp.text}"
@@ -319,9 +317,14 @@ class githubApi:
             if not repo_data:
                 continue
             nodes = repo_data.get("workflowRuns", {}).get("nodes", [])
-            if nodes:
-                self.logger.info(f"_graphql_in_progress_runs: {len(nodes)} run(s) in {full_name}")
-                result[full_name] = [{"id": n["databaseId"], "name": n["name"]} for n in nodes]
+            in_progress = [n for n in nodes if n.get("status") == "IN_PROGRESS"]
+            if in_progress:
+                self.logger.info(
+                    f"_graphql_in_progress_runs: {len(in_progress)} in-progress run(s) in {full_name}"
+                )
+                result[full_name] = [
+                    {"id": n["databaseId"], "name": n["name"]} for n in in_progress
+                ]
         return result
 
     def _list_run_jobs(self, repo_full_name: str, run_id: int) -> list:
