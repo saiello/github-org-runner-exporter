@@ -58,8 +58,8 @@ class runnerExports:
                     (
                         runner.get("name"),
                         str(runner.get("id")),
-                        info.get("repository", "unknown"),
-                        info.get("workflow", "unknown"),
+                        info.get("repository", "repo-nd"),
+                        info.get("workflow", "workflow-nd"),
                     )
                 )
 
@@ -114,8 +114,8 @@ class runnerExports:
         self.metric_runner_org_running_job.labels(
             runner.get("name"),
             str(runner.get("id")),
-            info.get("repository", "unknown"),
-            info.get("workflow", "unknown"),
+            info.get("repository", "repo-nd"),
+            info.get("workflow", "workflow-nd"),
         ).set(1)
 
     def aggregate_labels(self, labels: dict):
@@ -226,12 +226,10 @@ def main():
         runners_list = github.list_runners()
         any_busy = any(r.get("busy") for r in runners_list)
 
-        if any_busy and (time.time() - last_job_refresh) >= JOB_REFRESH_INTERVAL:
+        if any_busy:
             job_map = github.get_runner_jobs_map()
-            last_job_refresh = time.time()
         elif not any_busy:
             job_map = {}
-
         if runners_list:
             runner_exports.export_metrics(runners_list, job_map)
 
