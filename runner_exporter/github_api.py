@@ -107,8 +107,12 @@ class githubApi:
             raise
 
         self.logger.info(
-            f"Looking for installation: login=[{self.github_owner}] app_id=[{self.github_app_id}]"
+            "Looking for installation: login=[%s] app_id=[%s]",
+            self.github_owner,
+            self.github_app_id,
         )
+        # use same approach of myoung34/docker-github-actions-runner
+        # see: https://github.com/myoung34/docker-github-actions-runner/blob/master/app_token.sh#L80
         installation = next(
             (
                 i
@@ -124,21 +128,10 @@ class githubApi:
                 f"with app_id '{self.github_app_id}'. "
                 f"Available: {[(i['account']['login'], i['app_id']) for i in instalations]}"
             )
-        self.logger.info(f"Found installation {installation['id']} for '{self.github_owner}'")
+        self.logger.info("Found installation %s for '%s'", installation["id"], self.github_owner)
 
         try:
-            self.logger.info('Installations %s', instalations)
-            self.logger.info('Looking for login=[%s] app_id=[%s]', self.github_owner, self.github_app_id)
-            # use same approach of myoung34/docker-github-actions-runner
-            # see: https://github.com/myoung34/docker-github-actions-runner/blob/master/app_token.sh#L80
-            installation_filter = lambda i: i['account']['login'] == self.github_owner and str(i['app_id']) == str(self.github_app_id)
-            installation = next(filter(installation_filter, instalations))
-
-            self.logger.info('Found %s', installation)
-            resp = requests.post(
-                f"{installation['access_tokens_url']}",
-                headers=jwt_headers,
-            )
+            resp = requests.post(installation["access_tokens_url"], headers=jwt_headers)
             resp.raise_for_status()
             token_data = json.loads(resp.content)
         except requests.exceptions.RequestException as e:
