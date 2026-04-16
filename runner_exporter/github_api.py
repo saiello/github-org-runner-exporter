@@ -8,6 +8,7 @@ import datetime
 from dateutil import tz
 from prometheus_client import Gauge
 
+RATE_LIMIT_FLOOR = 100
 
 class githubApi:
     app_token = None
@@ -23,6 +24,7 @@ class githubApi:
         github_app_id: str = None,
         private_key: str = None,
         api_url: str = "https://api.github.com",
+        monitored_repos: list = None,
     ) -> None:
 
         if github_owner is None or github_owner.strip() == "":
@@ -40,6 +42,12 @@ class githubApi:
         self.github_owner = github_owner
         self.api_url = api_url
         self.logger = logger
+        self._remaining_rate_limit = None
+        self.monitored_repos = [
+            r if "/" in r else f"{github_owner}/{r}" for r in (monitored_repos or [])
+        ]
+
+        self.logger.info("GitHub API initialized with owner: %s, app_id: %s, monitored_repos: %s", github_owner, github_app_id, self.monitored_repos)
 
     def app_jwt_header(self):
         """
@@ -82,7 +90,7 @@ class githubApi:
             if not expires_at - now < datetime.timedelta(
                 minutes=self.renew_token_minutes
             ):
-                self.logger.debug("The current app token still valid.")
+                self.logger.info("The current app token still valid.")
                 return self.app_token
 
         jwt_headers = self.app_jwt_header()
@@ -96,6 +104,26 @@ class githubApi:
         except requests.exceptions.RequestException as e:
             self.logger.error("An error occured while getting app installations: %s", e)
             raise
+
+        self.logger.info(
+            f"Looking for installation: login=[{self.github_owner}] app_id=[{self.github_app_id}]"
+        )
+        installation = next(
+            (
+                i
+                for i in instalations
+                if i["account"]["login"] == self.github_owner
+                and str(i["app_id"]) == str(self.github_app_id)
+            ),
+            None,
+        )
+        if installation is None:
+            raise ValueError(
+                f"No GitHub App installation found for owner '{self.github_owner}' "
+                f"with app_id '{self.github_app_id}'. "
+                f"Available: {[(i['account']['login'], i['app_id']) for i in instalations]}"
+            )
+        self.logger.info(f"Found installation {installation['id']} for '{self.github_owner}'")
 
         try:
             self.logger.info('Installations %s', instalations)
@@ -165,14 +193,15 @@ class githubApi:
 
         while True:
             try:
-                self.logger.debug(f"Sending the api request for {url}")
+                self.logger.info(f"Sending the api request for {url}")
                 result = requests.get(url, headers=headers)
 
                 if result.headers:
                     remaining_requests = result.headers.get("X-RateLimit-Remaining")
-                    self.logger.debug(f"Remaining requests: {remaining_requests}")
+                    self.logger.info(f"Remaining requests: {remaining_requests}")
+                    self._remaining_rate_limit = int(remaining_requests)
                     self.metric_runner_api_ratelimit.labels(self.github_owner).set(
-                        int(remaining_requests)
+                        self._remaining_rate_limit
                     )
 
                 if not result.ok:
@@ -193,3 +222,91 @@ class githubApi:
                 return []
 
         return runners_list
+
+    def get_runner_jobs_map(self) -> dict:
+        """
+        Returns {runner_id (int): {'repository': 'org/repo', 'workflow': 'CI'}}
+        for all runners currently executing a job.
+        Returns {} if the rate limit is too low or on any error.
+        """
+        if (
+            self._remaining_rate_limit is not None
+            and self._remaining_rate_limit < RATE_LIMIT_FLOOR
+        ):
+            self.logger.warning(
+                f"Rate limit too low ({self._remaining_rate_limit}), skipping job enrichment"
+            )
+            return {}
+
+        if not self.monitored_repos:
+            self.logger.info("No monitored repos configured, skipping job enrichment")
+            return {}
+
+        result = {}
+        self.logger.info(f"Using monitored repos list: {self.monitored_repos}")
+        for repo_full_name in self.monitored_repos:
+            runs = self._list_in_progress_runs(repo_full_name)
+            for run in runs:
+                jobs = self._list_run_jobs(repo_full_name, run["id"])
+                for job in jobs:
+                    if job.get("status") == "in_progress" and job.get("runner_id"):
+                        result[job["runner_id"]] = {
+                            "repository": repo_full_name,
+                            "workflow": run.get("name", "unknown"),
+                        }
+        return result
+
+    def _list_in_progress_runs(self, repo_full_name: str) -> list:
+        """Returns list of in-progress workflow run dicts for the given repo."""
+        headers = self.get_headers()
+        url = f"{self.api_url}/repos/{repo_full_name}/actions/runs?status=in_progress&per_page=100"
+        try:
+            self.logger.info(f"_list_in_progress_runs: GET {url}")
+            result = requests.get(url, headers=headers)
+            self.logger.info(
+                f"_list_in_progress_runs: {result.status_code} {result.reason} [{repo_full_name}]"
+            )
+            if result.status_code == 404:
+                return []
+            if not result.ok:
+                self.logger.error(
+                    f"_list_in_progress_runs error for {repo_full_name}: "
+                    f"{result.status_code} {result.reason} {result.text}"
+                )
+                return []
+            runs = result.json().get("workflow_runs", [])
+            if runs:
+                self.logger.info(
+                    f"_list_in_progress_runs: {len(runs)} in-progress run(s) in {repo_full_name}"
+                )
+            if len(runs) == 100:
+                self.logger.warning(
+                    f"{repo_full_name} returned 100 in-progress runs; some may be missed"
+                )
+            return runs
+        except Exception as e:
+            self.logger.error(f"_list_in_progress_runs exception for {repo_full_name}: {e}")
+            return []
+
+    def _list_run_jobs(self, repo_full_name: str, run_id: int) -> list:
+        """Returns list of job dicts for the given workflow run."""
+        headers = self.get_headers()
+        url = f"{self.api_url}/repos/{repo_full_name}/actions/runs/{run_id}/jobs?per_page=100"
+        try:
+            self.logger.info(f"_list_run_jobs: GET {url}")
+            result = requests.get(url, headers=headers)
+            self.logger.info(
+                f"_list_run_jobs: {result.status_code} {result.reason} [run {run_id}]"
+            )
+            if not result.ok:
+                self.logger.error(
+                    f"_list_run_jobs error for run {run_id}: "
+                    f"{result.status_code} {result.reason} {result.text}"
+                )
+                return []
+            jobs = result.json().get("jobs", [])
+            self.logger.info(f"_list_run_jobs: {len(jobs)} job(s) for run {run_id}")
+            return jobs
+        except Exception as e:
+            self.logger.error(f"_list_run_jobs exception for run {run_id}: {e}")
+            return []
