@@ -251,7 +251,7 @@ class githubApi:
 
         # Step 2: fetch jobs for all in-progress runs in parallel
         run_triples = [
-            (repo, run["id"], run.get("name", "name-nd"))
+            (repo, run["id"], run.get("name") or f"run/{run['id']}")
             for repo, runs in repo_runs.items()
             for run in runs
         ]

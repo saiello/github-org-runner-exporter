@@ -1,7 +1,6 @@
 import os
-import time
 
-from prometheus_client import start_http_server, Counter, Gauge
+from prometheus_client import start_http_server, Gauge
 from time import sleep
 from logger import get_logger
 from github_api import githubApi
@@ -195,7 +194,6 @@ class runnerExports:
 
 def main():
     REFRESH_INTERVAL = int(os.getenv("REFRESH_INTERVAL", 30))
-    JOB_REFRESH_INTERVAL = int(os.getenv("JOB_REFRESH_INTERVAL", 120))
     PRIVATE_GITHUB_TOKEN = os.getenv("PRIVATE_GITHUB_TOKEN")
     GITHUB_APP_ID = os.getenv("GITHUB_APP_ID")
     GITHUB_PRIVATE_KEY = os.getenv("GITHUB_PRIVATE_KEY")
@@ -220,7 +218,6 @@ def main():
     )
 
     job_map = {}
-    last_job_refresh = 0.0
 
     while True:
         runners_list = github.list_runners()
