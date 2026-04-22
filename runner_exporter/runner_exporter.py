@@ -194,6 +194,7 @@ class runnerExports:
 
 def main():
     REFRESH_INTERVAL = int(os.getenv("REFRESH_INTERVAL", 30))
+    JOB_ENRICHMENT_DELAY = int(os.getenv("JOB_ENRICHMENT_DELAY", 5))
     PRIVATE_GITHUB_TOKEN = os.getenv("PRIVATE_GITHUB_TOKEN")
     GITHUB_APP_ID = os.getenv("GITHUB_APP_ID")
     GITHUB_PRIVATE_KEY = os.getenv("GITHUB_PRIVATE_KEY")
@@ -224,6 +225,7 @@ def main():
         any_busy = any(r.get("busy") for r in runners_list)
 
         if any_busy:
+            sleep(JOB_ENRICHMENT_DELAY)
             job_map = github.get_runner_jobs_map()
         elif not any_busy:
             job_map = {}
