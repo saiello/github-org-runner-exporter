@@ -110,13 +110,14 @@ class runnerExports:
                 self.metric_runner_org_running_job.remove(*labels_tuple)
 
     def export_runner_job(self, runner: dict, job_map: dict):
-        info = job_map.get(runner["id"], {})
-        self.metric_runner_org_running_job.labels(
-            runner.get("name"),
-            str(runner.get("id")),
-            info.get("repository", "repo-nd"),
-            info.get("workflow", "workflow-nd"),
-        ).set(1)
+        info = job_map.get(runner["id"], None)
+        if info is not None:
+            self.metric_runner_org_running_job.labels(
+                runner.get("name"),
+                str(runner.get("id")),
+                info.get("repository", "repo-nd"),
+                info.get("workflow", "workflow-nd"),
+            ).set(1)
 
     def aggregate_labels(self, labels: dict):
         """
